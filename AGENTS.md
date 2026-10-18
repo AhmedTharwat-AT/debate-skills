@@ -1,6 +1,6 @@
 # Working on debate-skills
 
-This repo is a [Skills CLI](https://github.com/vercel-labs/skills) package. It ships one skill, `debate-request`, which lets a host agent debate a topic with another coding agent CLI (`agy` or `opencode`) until they agree, verifying each other's claims instead of trusting them.
+This repo is a [Skills CLI](https://github.com/vercel-labs/skills) package. It ships one skill, `debate-request`, which lets a host agent debate a topic with another coding agent CLI (`agy`, `opencode` or `codex`) until they agree, verifying each other's claims instead of trusting them.
 
 ## Vocabulary
 
@@ -9,7 +9,7 @@ One controlled vocabulary keeps the docs from drifting. Use these terms; do not 
 | Use | For | Not |
 | --- | --- | --- |
 | **host** | the agent the user is chatting with, which runs the debate | "orchestrator", "driver", "controller" |
-| **opponent** | the other agent being debated (`agy`, `opencode`) | "worker", "sub-agent", "implementer" |
+| **opponent** | the other agent being debated (`agy`, `opencode`, `codex`) | "worker", "sub-agent", "implementer" |
 | **round** | one brief sent and one reply received | "turn", "iteration" |
 | **brief** | the self-contained text sent to the opponent for a round | "prompt", "message" |
 | **claim** | one numbered, evidence-backed statement | "point" (except in "consensus points"), "fact" |
@@ -20,6 +20,7 @@ One controlled vocabulary keeps the docs from drifting. Use these terms; do not 
 | **debate directory** | where rounds and `transcript.md` are kept | "workspace", "session folder" |
 | `plan` agent, `run`, `session` | OpenCode's own terms, used verbatim | "sandbox" (OpenCode has no sandbox enum) |
 | `sandbox`, `conversation`, `project`, `--print` | agy's own terms, used verbatim | "session" for agy |
+| `exec`, `resume`, `thread`, `-s` / `--sandbox` (`read-only`), `--json`, `-o` | Codex's own terms, used verbatim | calling the `thread id` a "conversation"; any write-capable sandbox, which is never used |
 
 Banned on sight: any reference to the author's local machine or config; model or CLI version pins outside the README's "Verification status" and the free-model order (which is labelled a judgment call); and any claim that cannot be backed by a run ("verified" without a run: hedge it or cut it).
 

@@ -1,8 +1,8 @@
-# Opponents: agy and opencode
+# Opponents: agy, opencode and codex
 
 What `scripts/debate.mjs` runs for each opponent, how it picks a model, and what to check when something goes wrong. Run `node scripts/debate.mjs discover` first; it shows what is installed here.
 
-CLI flags change between versions of both tools. The relay was written against public docs and the open-source `delegate-skills` project, and tested only against fake CLIs. If a real run fails with an unknown-flag error, run `<cli> --help` and tell the user.
+CLI flags change between versions of all three tools. The relay was written against public docs and the open-source `delegate-skills` project, and tested only against fake CLIs. If a real run fails with an unknown-flag error, run `<cli> --help` and tell the user.
 
 ## agy (Google Antigravity CLI)
 
@@ -57,6 +57,32 @@ That order is a judgment call, not a benchmark, and the free list changes. To ch
 
 **Sessions.** The session id (`ses_...`) is read from the event stream and returned as `sessionId`. The event format is parsed defensively and has not been checked against a live opencode run.
 
+## codex (OpenAI Codex CLI)
+
+**Install and sign in:** `npm i -g @openai/codex`, then `codex login`. `discover` reports `signedIn` from `codex login status`; treat it as a hint, not proof, because an older codex may not have that subcommand. For one run you can supply an API key with `CODEX_API_KEY`. Check which `codex` is on your PATH (`command -v codex`, `codex --version`): a stale install can shadow a new one, and old versions lack `exec --json`, `-o` and `exec resume`.
+
+**What the relay runs** (brief on stdin, signalled by the trailing `-`):
+
+```
+codex exec -s read-only --json -o <round-dir>/codex-last.txt [-m <model>] [-c model_reasoning_effort=<level>] -
+codex exec -s read-only resume --last --json -o <file> ...  -        # with --resume-last
+codex exec -s read-only resume <thread-id> --json -o <file> ...  -   # with --session <thread-id>
+```
+
+The sandbox flag goes before `resume`, matching how the `delegate-skills` project builds the command. Whether `resume <thread-id>` accepts the trailing `-` was not verified.
+
+**Model.** The relay has no default model for Codex. Without `--model` it uses whatever you have configured in Codex, and it cannot report which one that was; a warning says so. `--model <name>` goes to `-m` and `--effort <level>` to `-c model_reasoning_effort=<level>`, both unchanged. Which names and levels are accepted depends on your Codex account and version. The relay checks only that the value is a plain token (letters, digits and `. _ : / # @ + -`).
+
+**Read-only.** The relay passes `-s read-only` explicitly instead of relying on the default, and never passes `workspace-write`, `danger-full-access` or `--full-auto`. Inside that sandbox Codex should be able to read files and run commands that do not write, such as `git log`; that was not verified here. As with the other opponents, the working-tree fingerprint is the backstop.
+
+**Outside a git repository** Codex refuses to run without `--skip-git-repo-check`. The relay adds it when `--cd` is not a git repo, and the tripwire is then unknown (`readOnlyViolation: null`).
+
+**Final message and thread id.** The reply is read from the file written by `-o`; if that is missing, from the last `agent_message` item in the event stream (older releases call it `assistant_message`), never the earlier ones. The thread id from the `thread.started` event comes back as `sessionId`. Error events (`turn.failed`, `error`) are read defensively because their shape is not documented.
+
+**Prefer `--session` to `--resume-last`.** Codex's "most recent session" is global, so another Codex run in between, including your own host session if the host is Codex, can take its place. The relay warns when you use `--resume-last`. Since the protocol sends a self-contained brief every round, resuming is rarely needed at all.
+
+**Same model family as a Codex host.** If the host is also Codex, the two share blind spots. Prefer another opponent or a different `--model`. Whether `codex exec` can run from inside a Codex session at all, given the host's own sandbox, has not been verified.
+
 ## When a run fails
 
 | Symptom | Likely cause | Try |
@@ -65,6 +91,8 @@ That order is a judgment call, not a benchmark, and the free list changes. To ch
 | `failed`, error mentions an unknown flag | The CLI's flags changed | Run `<cli> --help`; report it to the user |
 | `failed`, `agy auto-denied` | agy blocked a command in headless mode | See "Permission traps" above |
 | `failed`, empty reply | The model returned nothing, or a tool loop ended without text | Retry once; ask for a shorter, more specific brief |
+| `failed`, codex error mentions login or auth | Not signed in | `codex login`, or `CODEX_API_KEY` for one run |
+| `failed`, codex complains about the directory or a git repo | Not a git repo, or a stale codex | Pass a git repo as `--cd`; check `codex --version` |
 | `failed`, rate limit or auth text in `stderrTail` | Free-tier limit, or not signed in | Wait, pick another free model with `--model`, or sign in |
 | `timeout` | The opponent was still working | Narrow the brief; raise `--timeout`; retry once |
 | `read_only_violation` | The opponent changed a file | Stop; show the user the files; do not revert on your own |

@@ -12,7 +12,7 @@ An opponent is another coding agent CLI that can read a repository and answer a 
 
 Changes needed:
 
-1. **`scripts/debate.mjs`:** add a probe (is it installed, its version, its models), model resolution, the argument builder, and reply parsing, next to the `agy` and `opencode` branches. Keep the read-only tripwire running. Use only Node built-ins.
+1. **`scripts/debate.mjs`:** add a probe (is it installed, its version, its models), model resolution, the argument builder, and reply parsing, next to the existing `agy`, `opencode` and `codex` branches. Keep the read-only tripwire running. Use only Node built-ins.
 2. **`test/smoke.mjs`:** add a fake CLI and cover argument building, a normal reply, a write attempt (must report `read_only_violation`), an empty reply, and a missing binary.
 3. **`references/opponents.md`:** a section with install and sign-in, what the relay runs, how it picks a model, and how read-only is enforced.
 4. **`SKILL.md` and README:** a row in the "Choose the opponent" tables.

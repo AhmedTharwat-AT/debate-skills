@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// debate.mjs - one round of a debate with an opponent coding-agent CLI (agy or opencode).
+// debate.mjs - one round of a debate with an opponent coding-agent CLI (agy, opencode or codex).
 //
 // Node built-ins only. No network calls of its own, no credentials, no telemetry.
 // It launches the opponent CLI and git, nothing else. It never commits and never
@@ -7,7 +7,7 @@
 // fingerprint taken before and after the run reports any change the opponent made.
 //
 //   node debate.mjs discover [--cd <dir>]
-//   node debate.mjs run --opponent agy|opencode --brief <file> [options]
+//   node debate.mjs run --opponent agy|opencode|codex --brief <file> [options]
 //
 // Usage errors exit 2 without writing a result file.
 
@@ -48,7 +48,7 @@ const FREE_MODEL_PREFERENCE = [
   'big-pickle',
 ];
 
-const HELP = `debate.mjs - run one debate round against an opponent CLI (agy or opencode)
+const HELP = `debate.mjs - run one debate round against an opponent CLI (agy, opencode or codex)
 
 Commands:
   discover [--cd <dir>]     Print JSON: which opponents are installed, their models,
@@ -56,24 +56,27 @@ Commands:
   run <options>             Send one brief to the opponent and capture its reply.
 
 run options:
-  --opponent <agy|opencode>  Which opponent to ask (required).
+  --opponent <agy|opencode|codex>  Which opponent to ask (required).
   --brief <file>             The brief for this round (required). Keep it outside the repo.
   --cd <dir>                 Repository the opponent should examine (default: cwd).
   --model <id>               agy: a model label (matched loosely against 'agy models').
                              opencode: provider/model. Default: see 'discover'.
-  --effort <level>           agy only: low | medium | high. Default with the default model: high.
+                             codex: a model name, passed to 'codex exec -m'. Default:
+                             codex's own configured model.
+  --effort <level>           agy: low | medium | high (default model: high).
+                             codex: reasoning effort, passed as -c model_reasoning_effort=<level>.
   --variant <name>           opencode only: provider reasoning variant (e.g. high, max).
   --resume-last              Continue the opponent's most recent conversation/session.
   --conversation <id>        agy only: continue a specific conversation.
-  --session <id>             opencode only: continue a specific session (ses_...).
+  --session <id>             opencode: a session id (ses_...). codex: a thread id.
   --debate-dir <dir>         Where rounds and transcript.md are kept (default: new temp dir).
   --round <n>                Round number (default: next free number for this opponent).
   --timeout <dur>            Watchdog, e.g. 90s, 20m, 1h30m (default: 20m).
   --help                     Show this help.
 
 Every run is read-only: agy runs in its sandbox, opencode runs its 'plan' agent
-without auto-approval. Environment overrides: DEBATE_AGY_BIN, DEBATE_OPENCODE_BIN,
-DEBATE_FREE_MODELS.
+without auto-approval, codex runs 'exec -s read-only'. Environment overrides:
+DEBATE_AGY_BIN, DEBATE_OPENCODE_BIN, DEBATE_CODEX_BIN, DEBATE_FREE_MODELS.
 
 Exit codes: 0 completed; 1 failed; 2 usage error (no result file); 3 the opponent
 changed the working tree; 124 timeout; 127 opponent CLI not found; 130/143 aborted.`;
@@ -131,12 +134,18 @@ const stripAnsi = (s) => s.replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, '');
 const tailLines = (s, n = 20) => s.split(/\r?\n/).filter(Boolean).slice(-n);
 const nowIso = () => new Date().toISOString();
 
+const OPPONENTS = ['agy', 'opencode', 'codex'];
+const BIN_ENV = { agy: 'DEBATE_AGY_BIN', opencode: 'DEBATE_OPENCODE_BIN', codex: 'DEBATE_CODEX_BIN' };
 function binFor(opponent) {
-  return process.env[opponent === 'agy' ? 'DEBATE_AGY_BIN' : 'DEBATE_OPENCODE_BIN'] || opponent;
+  return process.env[BIN_ENV[opponent]] || opponent;
 }
-// opencode installs as a .cmd shim on Windows, which only resolves through a shell.
-// Nothing user-controlled is ever placed in its argv except the model id.
-const needsShell = (opponent) => IS_WIN && opponent === 'opencode';
+// opencode and codex install as .cmd shims on Windows, which only resolve through a
+// shell. The only user-controlled values placed in their argv are the model, effort
+// and session/thread ids, and those are restricted to SAFE_TOKEN characters. Paths
+// the relay builds itself are quoted with shellArg when they contain whitespace.
+const needsShell = (opponent) => IS_WIN && (opponent === 'opencode' || opponent === 'codex');
+const SAFE_TOKEN = /^[A-Za-z0-9._:/#@+-]+$/;
+const shellArg = (s, shell) => (shell && /\s/.test(s) ? `"${s}"` : s);
 
 function probe(opponent, args, timeout = 30000) {
   const r = spawnSync(binFor(opponent), args, {
@@ -240,6 +249,24 @@ function pickFreeModel(free) {
     if (free.includes(id)) return id;
   }
   return free[0] || null;
+}
+
+// ---------------------------------------------------------------- codex
+
+// Codex has no model-listing command the relay relies on, so it keeps no model default
+// of its own: without --model, `codex exec` uses whatever the user has configured.
+// `codex login status` is a soft signal only (an old codex may not have that
+// subcommand), so a "not signed in" result produces a warning, never a refusal.
+function probeCodex() {
+  const v = probe('codex', ['--version'], 15000);
+  if (!v.ok) return { available: false, version: null, signedIn: null, loginNote: null };
+  const l = probe('codex', ['login', 'status'], 15000);
+  return {
+    available: true,
+    version: firstLine(v.stdout),
+    signedIn: l.missing ? null : l.ok,
+    loginNote: firstLine(l.stdout) || firstLine(l.stderr),
+  };
 }
 
 // ---------------------------------------------------------------- git fingerprint
@@ -377,20 +404,59 @@ function parseOpencodeEvents(stdout) {
   return { text: texts.join('\n').trim(), sessionId, cost: sawCost ? cost : null, errors };
 }
 
+// ---------------------------------------------------------------- codex output
+
+// `codex exec --json` streams one JSON object per line. The final answer is the last
+// `agent_message` item (older releases called it `assistant_message`); the thread id
+// comes from `thread.started`. Error event shapes are not documented, so they are read
+// defensively. The relay prefers the file written by `-o` and uses this as the fallback.
+function parseCodexEvents(stdout) {
+  let threadId = null; let usage = null; let last = '';
+  const errors = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t.startsWith('{')) continue;
+    let ev;
+    try { ev = JSON.parse(t); } catch { continue; }
+    if (ev.type === 'thread.started') {
+      threadId ??= ev.thread_id ?? ev.threadId ?? null;
+    } else if (ev.type === 'item.completed') {
+      const it = ev.item;
+      if (it && (it.type === 'agent_message' || it.type === 'assistant_message')
+        && typeof it.text === 'string' && it.text.trim()) last = it.text;
+    } else if (ev.type === 'turn.completed') {
+      usage = ev.usage ?? usage;
+    } else if (ev.type === 'turn.failed' || ev.type === 'error') {
+      errors.push(ev.error?.message ?? ev.message ?? (typeof ev.error === 'string' ? ev.error : JSON.stringify(ev.error ?? ev)));
+    }
+  }
+  return { text: last.trim(), threadId, usage, errors };
+}
+
 // ---------------------------------------------------------------- discover
 
 function cmdDiscover(o) {
   const cwd = resolve(o.cd || '.');
   const agy = probeAgy();
   const oc = probeOpencode();
+  const cx = probeCodex();
   const out = {
     schema: DISCOVER_SCHEMA,
     gitRepo: existsSync(cwd) ? gitRoot(cwd) !== null : false,
     opponents: {
       agy: { available: agy.available, version: agy.version, models: agy.models, default: null },
       opencode: { available: oc.available, version: oc.version, freeModels: oc.free, default: null },
+      codex: {
+        available: cx.available, version: cx.version, signedIn: cx.signedIn, loginNote: cx.loginNote, default: null,
+      },
     },
   };
+  if (cx.available) {
+    out.opponents.codex.default = {
+      model: null, effort: null,
+      note: "No default model: codex uses its own configured model. Pass --model / --effort to choose. signedIn comes from `codex login status`.",
+    };
+  }
   if (agy.available) {
     const r = resolveAgyModel(agy.models, AGY_DEFAULT_MODEL, AGY_DEFAULT_EFFORT);
     out.opponents.agy.default = {
@@ -428,14 +494,24 @@ function exitCodeFor(result) {
 
 async function cmdRun(o) {
   const opponent = o.opponent;
-  if (opponent !== 'agy' && opponent !== 'opencode') die('--opponent must be agy or opencode');
+  if (!OPPONENTS.includes(opponent)) die('--opponent must be agy, opencode or codex');
   if (!o.brief) die('--brief <file> is required');
   if (o['resume-last'] && (o.session || o.conversation)) die('--resume-last cannot be combined with --session/--conversation');
-  if (o.session && opponent !== 'opencode') die('--session is for opencode; use --conversation for agy');
-  if (o.conversation && opponent !== 'agy') die('--conversation is for agy; use --session for opencode');
-  if (o.effort && opponent !== 'agy') die('--effort is for agy; use --variant for opencode');
-  if (o.variant && opponent !== 'opencode') die('--variant is for opencode; use --effort for agy');
-  if (o.effort && !EFFORT_WORDS.includes(o.effort.toLowerCase())) die(`--effort must be one of: ${EFFORT_WORDS.join(', ')}`);
+  if (o.session && opponent === 'agy') die('--session is for opencode and codex; use --conversation for agy');
+  if (o.conversation && opponent !== 'agy') die('--conversation is for agy; use --session for opencode or codex');
+  if (o.effort && opponent === 'opencode') die('--effort is for agy and codex; use --variant for opencode');
+  if (o.variant && opponent !== 'opencode') die('--variant is for opencode; use --effort for agy or codex');
+  if (o.effort) {
+    const level = o.effort.toLowerCase();
+    if (opponent === 'agy' && !EFFORT_WORDS.includes(level)) die(`--effort must be one of: ${EFFORT_WORDS.join(', ')}`);
+    if (opponent === 'codex' && !/^[a-z][a-z0-9_-]*$/.test(level)) die('--effort must be a single word such as low, medium or high');
+  }
+  if (opponent !== 'agy') {
+    // These values can reach a shell on Windows, so keep them to plain token characters.
+    for (const [flag, val] of [['--model', o.model], ['--session', o.session], ['--variant', o.variant]]) {
+      if (val && !SAFE_TOKEN.test(val)) die(`${flag} may only contain letters, digits and . _ : / # @ + -`);
+    }
+  }
 
   const briefSrc = resolve(o.brief);
   if (!existsSync(briefSrc) || !statSync(briefSrc).isFile()) die(`brief not found: ${o.brief}`);
@@ -499,7 +575,7 @@ async function cmdRun(o) {
   };
 
   // ---- preflight
-  const info = opponent === 'agy' ? probeAgy() : probeOpencode();
+  const info = { agy: probeAgy, opencode: probeOpencode, codex: probeCodex }[opponent]();
   if (!info.available) {
     result.status = 'opponent_unavailable';
     result.exitCode = 127;
@@ -510,7 +586,8 @@ async function cmdRun(o) {
   result.opponentVersion = info.version;
 
   // ---- build the command line
-  let args; let input = null;
+  const root = gitRoot(cwd);
+  let args; let input = null; let codexLastPath = null;
   if (opponent === 'agy') {
     const requested = o.model || AGY_DEFAULT_MODEL;
     const effort = (o.effort || (o.model ? '' : AGY_DEFAULT_EFFORT)).toLowerCase() || null;
@@ -543,7 +620,7 @@ async function cmdRun(o) {
     args.push('--sandbox', '--dangerously-skip-permissions');
     args.push('--print-timeout', `${Math.ceil(timeoutMs / 1000)}s`);
     args.push(`--print=${briefText}`);
-  } else {
+  } else if (opponent === 'opencode') {
     let model = o.model || null;
     if (!model && !result.resumed) {
       model = pickFreeModel(info.free);
@@ -574,10 +651,32 @@ async function cmdRun(o) {
     else if (o.session) args.push('--session', o.session);
     // No --auto: the plan agent must not be auto-approved into edits.
     input = briefText;
+  } else {
+    // codex: `codex exec` in a read-only sandbox. The brief goes on stdin ("-"), the
+    // final message is written to a file with -o, and --json streams events to stdout.
+    codexLastPath = join(roundDir, 'codex-last.txt');
+    const model = o.model || null;
+    const effort = o.effort ? o.effort.toLowerCase() : null;
+    result.model = model;
+    result.effort = effort;
+    if (!model && !result.resumed) warnings.push("no --model given; codex used its own configured model, which the relay cannot report");
+    if (info.signedIn === false) {
+      warnings.push(`\`codex login status\` did not report a signed-in account${info.loginNote ? ` (${info.loginNote})` : ''}; the run may fail with an auth error`);
+    }
+    if (o['resume-last']) {
+      warnings.push("codex's most recent session is global and may not be this debate's thread; prefer --session <thread id> (the sessionId in an earlier result.json)");
+    }
+    const pre = ['-s', 'read-only'];
+    if (!root) pre.push('--skip-git-repo-check'); // codex refuses to run outside a git repo otherwise
+    const post = ['--json', '-o', shellArg(codexLastPath, needsShell('codex'))];
+    if (model) post.push('-m', model);
+    if (effort) post.push('-c', `model_reasoning_effort=${effort}`);
+    if (o['resume-last'] || o.session) args = ['exec', ...pre, 'resume', o.session || '--last', ...post, '-'];
+    else args = ['exec', ...pre, ...post, '-'];
+    input = briefText;
   }
 
   // ---- run it, fingerprinting the working tree before and after
-  const root = gitRoot(cwd);
   const before = root ? snapshot(root) : null;
   // agy enforces its own --print-timeout first; the relay watchdog is the backstop.
   const watchdogMs = timeoutMs + (opponent === 'agy' ? WATCHDOG_GRACE_MS : 0);
@@ -613,6 +712,16 @@ async function cmdRun(o) {
     result.sessionId = parsed.sessionId;
     result.cost = parsed.cost;
     if (parsed.errors.length && !text) result.error = `opencode reported: ${parsed.errors.join('; ')}`;
+  } else if (opponent === 'codex') {
+    writeFileSync(eventsPath, res.stdout);
+    result.eventsPath = eventsPath;
+    const parsed = parseCodexEvents(stdout);
+    let fromFile = '';
+    try { fromFile = readFileSync(codexLastPath, 'utf8').trim(); } catch { /* codex wrote no file */ }
+    text = fromFile || parsed.text;
+    result.sessionId = parsed.threadId;
+    result.usage = parsed.usage;
+    if (parsed.errors.length && !text) result.error = `codex reported: ${parsed.errors.join('; ')}`;
   } else {
     text = stdout.trim();
   }

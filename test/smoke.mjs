@@ -69,12 +69,48 @@ process.stdin.on('end', () => {
 });
 `;
 
+// Emits the event shapes `codex exec --json` documents: thread.started, item.completed
+// with agent_message items (a preamble first, then the final answer), turn.completed.
+// The final answer is also written to the -o file, as real codex does.
+const FAKE_CODEX = `#!/usr/bin/env node
+const fs = require('fs');
+const argv = process.argv.slice(2);
+if (process.env.FAKE_ARGV_LOG) fs.appendFileSync(process.env.FAKE_ARGV_LOG, JSON.stringify(argv) + '\\n');
+const mode = process.env.FAKE_MODE || 'normal';
+if (argv[0] === '--version') { console.log('codex-cli 0.150.1'); process.exit(0); }
+if (argv[0] === 'login' && argv[1] === 'status') {
+  if (process.env.FAKE_CODEX_LOGGED_OUT) { console.error('Not logged in'); process.exit(1); }
+  console.log('Logged in using ChatGPT'); process.exit(0);
+}
+if (argv[0] !== 'exec') { console.error('unexpected: ' + argv.join(' ')); process.exit(2); }
+const oi = argv.indexOf('-o');
+const outFile = oi >= 0 ? argv[oi + 1] : null;
+let stdin = '';
+process.stdin.on('data', (d) => { stdin += d; });
+process.stdin.on('end', () => {
+  if (mode === 'write') fs.writeFileSync(process.env.FAKE_WRITE_PATH, 'changed by opponent');
+  if (mode === 'sleep') { setInterval(() => {}, 1000); return; }
+  if (mode === 'empty') process.exit(0);
+  const ev = (o) => console.log(JSON.stringify(o));
+  ev({ type: 'thread.started', thread_id: 'thr-fake-1' });
+  ev({ type: 'turn.started' });
+  if (mode === 'error') { ev({ type: 'turn.failed', error: { message: 'model exploded' } }); process.exit(1); }
+  ev({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'preamble: let me look' } });
+  const final = 'AGREE 1: checked. stdin_chars=' + stdin.length;
+  ev({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: final } });
+  ev({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 } });
+  if (outFile && mode !== 'nofile') fs.writeFileSync(outFile, final);
+});
+`;
+
 const bin = join(work, 'bin');
 mkdirSync(bin);
 const agyBin = join(bin, 'fake-agy');
 const ocBin = join(bin, 'fake-opencode');
+const codexBin = join(bin, 'fake-codex');
 writeFileSync(agyBin, FAKE_AGY); chmodSync(agyBin, 0o755);
 writeFileSync(ocBin, FAKE_OPENCODE); chmodSync(ocBin, 0o755);
+writeFileSync(codexBin, FAKE_CODEX); chmodSync(codexBin, 0o755);
 
 // A throwaway git repo with one committed file.
 const repo = join(work, 'repo');
@@ -96,12 +132,15 @@ function relay(args, env = {}, cwd = repo) {
   writeFileSync(argvLog, '');
   const r = spawnSync(process.execPath, [RELAY, ...args], {
     cwd, encoding: 'utf8', timeout: 60000,
-    env: { ...process.env, DEBATE_AGY_BIN: agyBin, DEBATE_OPENCODE_BIN: ocBin, FAKE_ARGV_LOG: argvLog, ...env },
+    env: {
+      ...process.env, DEBATE_AGY_BIN: agyBin, DEBATE_OPENCODE_BIN: ocBin, DEBATE_CODEX_BIN: codexBin,
+      FAKE_ARGV_LOG: argvLog, ...env,
+    },
   });
   const m = /^result: (.+)$/m.exec(r.stdout || '');
   const result = m && existsSync(m[1]) ? JSON.parse(readFileSync(m[1], 'utf8')) : null;
   const runArgv = readFileSync(argvLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
-    .filter((a) => a.some((x) => x.startsWith('--print=')) || a[0] === 'run').pop() || null;
+    .filter((a) => a.some((x) => x.startsWith('--print=')) || a[0] === 'run' || a[0] === 'exec').pop() || null;
   return { code: r.status, stdout: r.stdout, stderr: r.stderr, result, runArgv };
 }
 
@@ -226,7 +265,96 @@ test('opencode: an error event with no text is a failure, not a completed run', 
   ok(/model exploded/.test(r.result.error), 'error carries the opponent message');
 });
 
-for (const opponent of ['agy', 'opencode']) {
+const codexRun = (extra = [], env = {}, cwd = repo) =>
+  relay(['run', '--opponent', 'codex', '--brief', brief(), '--cd', cwd, '--debate-dir', dd(), ...extra], env, cwd);
+
+test('discover: reports codex with no default model and its login state', () => {
+  const d = JSON.parse(relay(['discover']).stdout);
+  eq(d.opponents.codex.available, true, 'available');
+  eq(d.opponents.codex.signedIn, true, 'signedIn');
+  eq(d.opponents.codex.default.model, null, 'no model default');
+  const out = JSON.parse(relay(['discover'], { FAKE_CODEX_LOGGED_OUT: '1' }).stdout);
+  eq(out.opponents.codex.signedIn, false, 'signed-out state is reported');
+});
+
+test('codex: read-only exec, brief on stdin, final message from -o, thread id captured', () => {
+  const r = codexRun();
+  eq(r.code, 0, 'exit');
+  eq(r.result.status, 'completed', 'status');
+  const a = r.runArgv;
+  eq(a[0], 'exec', 'subcommand');
+  eq(a[a.indexOf('-s') + 1], 'read-only', 'sandbox must be read-only');
+  ok(has(a, '--json'), '--json');
+  ok(a[a.indexOf('-o') + 1].endsWith('codex-last.txt'), '-o file');
+  eq(a[a.length - 1], '-', 'brief is read from stdin');
+  ok(!has(a, '-m') && !has(a, '-c'), 'no model or effort unless asked');
+  ok(!has(a, '--skip-git-repo-check'), 'not needed inside a git repo');
+  ok(!a.some((x) => /workspace-write|danger-full-access|full-auto|dangerously/.test(x)), 'no write-capable flag');
+  ok(/AGREE 1/.test(r.result.finalMessage), 'final message');
+  ok(!/preamble/.test(r.result.finalMessage), 'only the last agent message, not the preamble');
+  ok(/stdin_chars=\d+/.test(r.result.finalMessage), 'brief arrived on stdin');
+  eq(r.result.sessionId, 'thr-fake-1', 'thread id');
+  eq(r.result.usage.output_tokens, 5, 'usage');
+  eq(r.result.readOnlyViolation, false, 'violation');
+  ok(r.result.warnings.some((w) => /configured model/.test(w)), 'says it used the configured model');
+});
+
+test('codex: --model and --effort map to -m and -c model_reasoning_effort', () => {
+  const r = codexRun(['--model', 'my-model.v2', '--effort', 'High']);
+  eq(r.runArgv[r.runArgv.indexOf('-m') + 1], 'my-model.v2', '-m');
+  eq(r.runArgv[r.runArgv.indexOf('-c') + 1], 'model_reasoning_effort=high', '-c');
+  eq(r.result.model, 'my-model.v2', 'model recorded');
+  eq(r.result.effort, 'high', 'effort recorded');
+  ok(!r.result.warnings.some((w) => /configured model/.test(w)), 'no configured-model warning when a model is named');
+});
+
+test('codex: --resume-last and --session resume, with the sandbox set before `resume`', () => {
+  const a = codexRun(['--resume-last']);
+  const i = a.runArgv.indexOf('resume');
+  ok(i > 0 && a.runArgv.indexOf('-s') < i, '-s comes before resume');
+  eq(a.runArgv[i + 1], '--last', '--last');
+  eq(a.runArgv[a.runArgv.indexOf('-s') + 1], 'read-only', 'still read-only on resume');
+  eq(a.result.resumed, true, 'resumed');
+  ok(a.result.warnings.some((w) => /prefer --session/.test(w)), '--resume-last warns that "most recent" is global');
+  const b = codexRun(['--session', 'thr-9']);
+  ok(!b.result.warnings.some((w) => /prefer --session/.test(w)), 'an explicit --session does not warn');
+  eq(b.runArgv[b.runArgv.indexOf('resume') + 1], 'thr-9', 'thread id');
+  eq(b.runArgv[b.runArgv.length - 1], '-', 'brief on stdin');
+});
+
+test('codex: outside a git repo it passes --skip-git-repo-check and reports the tripwire as unknown', () => {
+  const r = codexRun([], {}, plainDir);
+  eq(r.result.status, 'completed', 'status');
+  ok(has(r.runArgv, '--skip-git-repo-check'), 'flag');
+  eq(r.result.readOnlyViolation, null, 'tripwire unknown');
+});
+
+test('codex: falls back to the last agent_message when -o wrote nothing', () => {
+  const r = codexRun([], { FAKE_MODE: 'nofile' });
+  eq(r.result.status, 'completed', 'status');
+  ok(/AGREE 1/.test(r.result.finalMessage) && !/preamble/.test(r.result.finalMessage), 'last agent_message only');
+});
+
+test('codex: a turn.failed event is a failure that carries the message', () => {
+  const r = codexRun([], { FAKE_MODE: 'error' });
+  eq(r.code, 1, 'exit');
+  eq(r.result.status, 'failed', 'status');
+  ok(/model exploded/.test(r.result.error), 'error carries the opponent message');
+});
+
+test('codex: not being signed in warns but does not block the run', () => {
+  const r = codexRun([], { FAKE_CODEX_LOGGED_OUT: '1' });
+  eq(r.result.status, 'completed', 'status');
+  ok(r.result.warnings.some((w) => /login status/.test(w)), 'warns');
+});
+
+test('codex: watchdog kills a hung run and reports timeout (exit 124)', () => {
+  const r = codexRun(['--timeout', '2s'], { FAKE_MODE: 'sleep' });
+  eq(r.code, 124, 'exit');
+  eq(r.result.status, 'timeout', 'status');
+});
+
+for (const opponent of ['agy', 'opencode', 'codex']) {
   test(`${opponent}: a write to the repo is caught as a read-only violation`, () => {
     const target = join(repo, 'a.txt');
     const r = relay(['run', '--opponent', opponent, '--brief', brief(), '--cd', repo, '--debate-dir', dd()], { FAKE_MODE: 'write', FAKE_WRITE_PATH: target });
@@ -260,7 +388,8 @@ for (const opponent of ['agy', 'opencode']) {
   });
 
   test(`${opponent}: missing binary writes a result and exits 127`, () => {
-    const env = opponent === 'agy' ? { DEBATE_AGY_BIN: join(work, 'nope') } : { DEBATE_OPENCODE_BIN: join(work, 'nope') };
+    const binVar = { agy: 'DEBATE_AGY_BIN', opencode: 'DEBATE_OPENCODE_BIN', codex: 'DEBATE_CODEX_BIN' }[opponent];
+    const env = { [binVar]: join(work, 'nope') };
     const r = relay(['run', '--opponent', opponent, '--brief', brief(), '--cd', repo, '--debate-dir', dd()], env);
     eq(r.code, 127, 'exit');
     eq(r.result.status, 'opponent_unavailable', 'status');
@@ -313,6 +442,12 @@ test('usage errors exit 2 and write no result file', () => {
     [['run', '--opponent', 'agy', '--brief', b, '--resume-last', '--conversation', 'c'], 'cannot be combined'],
     [['run', '--opponent', 'agy', '--brief', b, '--round', '0'], '--round'],
     [['run', '--opponent', 'agy', '--brief', b, '--bogus'], 'unknown option'],
+    [['run', '--opponent', 'codex', '--brief', b, '--variant', 'high'], '--effort'],
+    [['run', '--opponent', 'codex', '--brief', b, '--conversation', 'c'], '--session'],
+    [['run', '--opponent', 'codex', '--brief', b, '--effort', 'hi gh'], '--effort'],
+    [['run', '--opponent', 'codex', '--brief', b, '--model', 'a b'], 'may only contain'],
+    [['run', '--opponent', 'opencode', '--brief', b, '--model', 'm;rm -rf'], 'may only contain'],
+    [['run', '--opponent', 'opencode', '--brief', b, '--session', 'ses_$(x)'], 'may only contain'],
     [['frobnicate'], 'unknown command'],
   ];
   for (const [args, needle] of cases) {

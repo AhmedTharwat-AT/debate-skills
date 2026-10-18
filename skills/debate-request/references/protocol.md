@@ -98,7 +98,7 @@ Signs you are drifting: you agreed because the reply was fluent; you softened a 
 
 ## Evidence the opponent cannot gather
 
-The opponent runs sandboxed or in a read-only agent, and OpenCode's `plan` agent may be blocked from running shell commands. If a claim needs command output (a test run, a long `git log`), run it yourself and paste the relevant excerpt into the brief, labelled as your output. The opponent should still check what it can from the files.
+The opponent runs sandboxed or in a read-only agent, and OpenCode's `plan` agent may be blocked from running shell commands (Codex's read-only sandbox may be too; not verified). If a claim needs command output (a test run, a long `git log`), run it yourself and paste the relevant excerpt into the brief, labelled as your output. The opponent should still check what it can from the files.
 
 ## Agreement
 
@@ -137,4 +137,4 @@ Report both positions and what would settle each open point. Do not split the di
 Nothing in the repo was modified. Transcript: <debateDir>/transcript.md
 ```
 
-Leave out empty sections. With two opponents, give an Agreed/Not agreed list per opponent plus a line on where the two opponents disagreed with each other. Make no changes based on the result unless the user asks.
+Leave out empty sections. With more than one opponent, give an Agreed/Not agreed list per opponent plus a line on where the opponents disagreed with each other. Make no changes based on the result unless the user asks.
