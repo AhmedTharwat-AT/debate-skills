@@ -5,7 +5,7 @@
 Ask the agent you are already chatting with (Codex, Claude Code, Cursor, anything that runs shell commands) to check a feature, a bug, or a commit history and debate it with a second agent CLI: Google Antigravity (`agy`) or OpenCode. They go back and forth until they agree. Neither side takes the other's word for anything: your agent checks every claim against the code before it agrees or refuses, and the opponent is told to do the same to your agent.
 
 ```
-npx skills add <your-github-user>/debate-skills
+npx skills add AhmedTharwat-AT/debate-skills
 ```
 
 Then:
@@ -55,21 +55,21 @@ Name a model or effort in your request and that wins. Only free OpenCode models 
 Browse first:
 
 ```
-npx skills add <your-github-user>/debate-skills --list
+npx skills add AhmedTharwat-AT/debate-skills --list
 ```
 
 Install the package, or just the skill:
 
 ```
-npx skills add <your-github-user>/debate-skills
-npx skills add <your-github-user>/debate-skills --skill debate-request
+npx skills add AhmedTharwat-AT/debate-skills
+npx skills add AhmedTharwat-AT/debate-skills --skill debate-request
 ```
 
 For a specific agent, or globally:
 
 ```
-npx skills add <your-github-user>/debate-skills --skill debate-request --agent codex
-npx skills add <your-github-user>/debate-skills --global
+npx skills add AhmedTharwat-AT/debate-skills --skill debate-request --agent codex
+npx skills add AhmedTharwat-AT/debate-skills --global
 ```
 
 To try it from a local checkout before publishing, run `npx skills add ./debate-skills --list` (or point at the folder you cloned). Works with any host agent the [Skills CLI](https://github.com/vercel-labs/skills) supports.
