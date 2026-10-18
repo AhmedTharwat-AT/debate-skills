@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+.debate/
+debate-request-*/
+
+# Local Claude Code reads CLAUDE.md; AGENTS.md is the committed copy.
+CLAUDE.md

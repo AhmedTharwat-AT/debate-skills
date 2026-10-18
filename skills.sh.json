@@ -1,0 +1,12 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "groupings": [
+    {
+      "title": "Debate other agents",
+      "description": "Have your agent debate a topic with another coding agent CLI until they agree, verifying each other's claims instead of trusting them.",
+      "skills": [
+        "debate-request"
+      ]
+    }
+  ]
+}
